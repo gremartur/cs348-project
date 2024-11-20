@@ -13,20 +13,33 @@ app.use(cors());
 app.post('/users', async (req, res) => {
     const { name, email } = req.body;
 
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const existingUser = await User.aggregate([
             { $match: { email } },
             { $limit: 1 }
-        ]);
+        ]).session(session);
 
         if (existingUser.length > 0) {
+            await session.abortTransaction();
+            session.endSession();
+
             return res.status(400).json({ error: 'User already exists with this email' });
         }
 
         const newUser = new User({ name, email });
-        await newUser.save();
+        await newUser.save({ session });
+
+        await session.commitTransaction();
+        session.endSession();
+
         res.status(201).json(newUser);
     } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+
         console.error(error);
         res.status(400).json({ error: error.message });
     }
@@ -48,7 +61,7 @@ app.get('/users/:id', async (req, res) => {
 
     try {
         const user = await User.aggregate([
-            { $match: { _id: new mongoose.Types.ObjectId(userId) } }, // Added 'new' keyword
+            { $match: { _id: new mongoose.Types.ObjectId(userId) } }, 
             { $limit: 1 }
         ]);
 
@@ -65,49 +78,70 @@ app.get('/users/:id', async (req, res) => {
 
 // Endpoint to update a user's details
 app.put('/users/:id', async (req, res) => {
-  const userId = req.params.id;
-  const { name, email } = req.body;
+    const userId = req.params.id;
+    const { name, email } = req.body;
 
-  try {
-      const updatedUser = await User.findByIdAndUpdate(
-          userId,
-          { name, email },
-          { new: true }
-      );
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-      if (!updatedUser) {
-          return res.status(404).json({ error: 'User not found' });
-      }
+    try {
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            { name, email },
+            { new: true, session }
+        );
 
-      res.status(200).json(updatedUser);
-  } catch (error) {
-      console.error(error);
-      res.status(400).json({ error: error.message });
-  }
+        if (!updatedUser) {
+            await session.abortTransaction();
+            session.endSession();
+
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.status(200).json(updatedUser);
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+
+        console.error(error);
+        res.status(400).json({ error: error.message });
+    }
 });
 
 // Endpoint to delete a user and all their recipes
 app.delete('/users/:id', async (req, res) => {
-  const userId = req.params.id;
+    const userId = req.params.id;
 
-  try {
-      // Check if user exists
-      const user = await User.findById(userId);
-      if (!user) {
-          return res.status(404).json({ error: 'User not found' });
-      }
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-      // Delete the user
-      await User.findByIdAndDelete(userId);
+    try {
+        // Check if user exists
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
 
-      // Delete all recipes created by the user
-      await Recipe.deleteMany({ createdBy: user._id });
+        // Delete the user
+        await User.findByIdAndDelete(userId).session(session);
 
-      res.status(204).send(); // Successfully deleted, no content to return
-  } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: error.message });
-  }
+        // Delete all recipes created by the user
+        await Recipe.deleteMany({ createdBy: user._id }).session(session);
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.status(204).send(); // Successfully deleted, no content to return
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+
+        console.error(error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 
@@ -123,30 +157,40 @@ app.get('/recipes', async (req, res) => {
 
 // Endpoint for creating a recipe
 app.post('/recipes', async (req, res) => {
-  const { name, ingredients, instructions, createdBy } = req.body;
+    const { name, ingredients, instructions, createdBy } = req.body;
 
-  try {
-      // Find the user by ID to check if they exist
-      const user = await User.findById(createdBy);
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-      if (!user) { // Check if user is null or undefined
-          return res.status(400).json({ error: 'User does not exist' });
-      }
+    try {
+        // Find the user by ID to check if they exist
+        const user = await User.findById(createdBy);
 
-      // Create the new recipe
-      const newRecipe = new Recipe({
-          name,
-          ingredients: ingredients.split(','),
-          instructions,
-          createdBy: user._id // Pass user ID directly
-      });
+        if (!user) { // Check if user is null or undefined
+            return res.status(400).json({ error: 'User does not exist' });
+        }
 
-      await newRecipe.save();
-      res.status(201).json(newRecipe);
-  } catch (error) {
-      console.error(error);
-      res.status(400).json({ error: error.message });
-  }
+        // Create the new recipe
+        const newRecipe = new Recipe({
+            name,
+            ingredients: ingredients.split(','),
+            instructions,
+            createdBy: user._id // Pass user ID directly
+        });
+
+        await newRecipe.save({ session });
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.status(201).json(newRecipe);
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+
+        console.error(error);
+        res.status(400).json({ error: error.message });
+    }
 });
 
 
@@ -155,14 +199,28 @@ app.put('/recipes/:id', async (req, res) => {
     const { id } = req.params;
     const { name, ingredients, instructions, createdBy } = req.body;
 
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const updatedRecipe = await Recipe.findByIdAndUpdate(
             id,
             { name, ingredients: ingredients.split(','), instructions, createdBy },
-            { new: true }
+            { new: true, session }
         );
+
+        if (!updatedRecipe) {
+            throw new Error('Recipe not found');
+        }
+
+        await session.commitTransaction();
+        session.endSession();
+
         res.status(200).json(updatedRecipe);
     } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+
         res.status(400).json({ error: error.message });
     }
 });
@@ -171,10 +229,23 @@ app.put('/recipes/:id', async (req, res) => {
 app.delete('/recipes/:id', async (req, res) => {
     const { id } = req.params;
 
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-        await Recipe.findByIdAndDelete(id);
+        await Recipe.findByIdAndDelete(id, { session });
+        if (!deletedRecipe) {
+            throw new Error('Recipe not found');
+        }
+
+        await session.commitTransaction();
+        session.endSession();
+
         res.status(204).send();
     } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        
         res.status(500).json({ error: error.message });
     }
 });
